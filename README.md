@@ -1,105 +1,71 @@
 # FlightHub
 
-Internal **flight search and booking console** for agency staff: browse the schedule, filter flights, book a seat with passenger details, look up reservations, and cancel them. The backend is **FastAPI + SQLite**; the staff UI is **static HTML/CSS/JavaScript** served by **Express**.
+Flight search and booking for internal staff: browse schedules, filter bookable flights, reserve seats with passenger details, look up reservations, and cancel them.
 
 ---
 
-## Project overview
+## Tech stack
 
-| Layer | Role |
-|--------|------|
-| **Backend** (`backend/`) | REST API, transactional inventory, deterministic seat map, domain validation |
-| **Frontend** (`frontend/`) | FlightHub dashboard (search, table, booking form, cabin map, lookup, cancel) |
-| **Database** | SQLite file (default `./flighthub.db` when uvicorn runs from `backend/`) |
+| Layer | Details |
+|-------|---------|
+| Backend | FastAPI · SQLAlchemy · SQLite (`backend/app/`) |
+| Frontend | HTML, CSS, JS — static files via Express (`frontend/public/`) |
+| API | REST JSON (`/flights`, `/bookings`; no `/api` prefix) |
 
-There is **no** `/api` prefix: routes are rooted at **`/flights`** and **`/bookings`**.
-
----
-
-## Prerequisites
-
-- **Python** 3.10+ recommended  
-- **Node.js** 18+ (for the static UI server)
+Deeper design (inventory, transactions, layering) lives in **`ARCHITECTURE.md`**.
 
 ---
 
-## Dependency installation
+## Quick start (~2 terminals)
 
-### Backend
+**Prerequisites:** Python 3.10+, Node.js 18+.
+
+### 1. Backend
 
 ```bash
 cd backend
 python -m venv .venv
-
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-
-# macOS / Linux
-source .venv/bin/activate
-
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # optional — for pytest
 ```
-
-Optional (tests + scripts):
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-```
-
----
-
-## Run locally (clean clone)
-
-Use **two terminals**: API first, then UI.
-
-### Backend (FastAPI)
-
-From `backend/`:
 
 ```bash
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-- API: `http://127.0.0.1:8000`
-- Interactive docs: `http://127.0.0.1:8000/docs`
+| | URL |
+|--|-----|
+| API | http://127.0.0.1:8000 |
+| Swagger | http://127.0.0.1:8000/docs |
 
-### Frontend (Express static server)
-
-From `frontend/`:
+### 2. Frontend
 
 ```bash
+cd frontend
+npm install
 npm start
 ```
 
-- UI: `http://127.0.0.1:3000` (override with `PORT=8080 npm start` if needed)
+| | URL |
+|--|-----|
+| UI | http://127.0.0.1:3000 |
 
-In the UI header, **Backend base URL** defaults to `http://127.0.0.1:8000`. Click **Test connection** to verify CORS and reachability.
-
-**CORS** is restricted to `http://127.0.0.1:3000` and `http://localhost:3000`; use one of those origins or extend `backend/app/main.py`.
+Set **Backend base URL** in the header to `http://127.0.0.1:8000` (default). Use **Test connection** once the API is up. CORS allows `localhost:3000` and `127.0.0.1:3000` only — see `backend/app/main.py` if you need another origin.
 
 ---
 
 ## Tests
 
-From `backend/`:
-
 ```bash
+cd backend
 python -m pytest
 ```
 
-Runs isolated SQLite per test (`tests/conftest.py`) and subprocess checks for `scripts/verify_*.py`. See **`requirements-dev.txt`** for pytest.
-
-Optional one-off verification (each script uses its own temp DB):
+Optional smoke scripts (each uses a temporary SQLite file):
 
 ```bash
-cd backend
 python scripts/verify_flight_api.py
 python scripts/verify_booking_api.py
 python scripts/verify_overbooking_concurrency.py
@@ -107,51 +73,25 @@ python scripts/verify_overbooking_concurrency.py
 
 ---
 
-## Documentation
+## Assumptions (brief)
 
-| File | Contents |
-|------|-----------|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System design: inventory, concurrency, cancellations, layering |
-| [`USER_GUIDE.md`](USER_GUIDE.md) | How to use the UI and **`curl`** examples for every endpoint |
-| [`AI_USAGE.md`](AI_USAGE.md) | How AI-assisted development was used on this project |
-| [`TASK.md`](TASK.md) | Original assessment requirements (if applicable) |
+- **No auth** — internal-trust boundary.
+- **Search date filter** uses **UTC calendar day** bounds.
+- **`FLITHUB_RESET_SQLITE_ON_START`** (see `backend/app/main.py`) can wipe DB on startup — dev only.
 
----
-
-## Assumptions and design notes
-
-1. **Trust boundary**: No authentication is implemented; FlightHub is an internal operator tool.
-2. **Time zones**: **`departure_date`** filters use **UTC** calendar-day bounds; timestamps are timezone-aware (`departure_datetime`).
-3. **Inventory truth**: Responses expose **`seats_available`** derived from **confirmed occupancy** on the canonical seat catalogue (aligned with **`GET /flights/{id}/seat-map`**), not naive row counts alone.
-4. **Concurrency**: Last-seat safety uses a **conditional `UPDATE`** on `Flight.seats_available`; after a successful booking insert, **`reconcile_flight_inventory`** keeps the persisted column aligned with derived open seats.
-5. **Cancellation**: Second cancel on the same reference returns **HTTP 409** (`BookingAlreadyCancelledError`); the UI treats that as informational.
-6. **SQLite**: Engine uses `check_same_thread=False` and a **busy timeout** for writer contention; see `app/db/session.py`.
-7. **Optional reset**: Set `FLITHUB_RESET_SQLITE_ON_START=1` to wipe flights and bookings on API startup (development only).
+For inventory rules, cancellation semantics, and concurrency, see **`ARCHITECTURE.md`**.
 
 ---
 
-## Repository layout
+## Project structure
 
 ```
-savvpro-test-flight/
-├── backend/
-│   ├── app/                 # FastAPI application
-│   ├── scripts/             # Standalone verification scripts
-│   ├── tests/               # pytest suite
-│   ├── requirements.txt
-│   └── requirements-dev.txt
-├── frontend/
-│   ├── public/              # index.html, css/, js/
-│   ├── server.js
-│   └── package.json
-├── ARCHITECTURE.md
-├── USER_GUIDE.md
-├── AI_USAGE.md
-└── README.md
+backend/          FastAPI app, pytest, verification scripts
+frontend/         Express static server + public UI
+USER_GUIDE.md     How to use the UI + sample curl
+ARCHITECTURE.md   Technical design
+AI_USAGE.md       AI-assisted development disclosure
+TASK.md           Original assessment brief (if applicable)
 ```
 
----
-
-## Assessment / submission
-
-If you are completing a hiring task, follow the fork / branch instructions in your assignment (see legacy steps in your fork’s history or **`TASK.md`**). This README is the primary **project** documentation for running and understanding FlightHub.
+Assessment submission mechanics (fork/branch): follow **`TASK.md`** or your recruiter’s instructions.

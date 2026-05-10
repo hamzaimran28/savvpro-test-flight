@@ -1,200 +1,125 @@
-# FlightHub — System architecture (as implemented)
+# FlightHub — Architecture
 
-This document matches the **current** codebase: FastAPI routers, SQLite, service-layer transactions, deterministic seat maps, Express-hosted static UI, and pytest tooling.
-
----
-
-## 1. Goals & scope
-
-**In scope**
-
-- Browse full schedule (**including** sold-out flights).
-- Search flights with inventory filters (derived open seats **`> 0`**).
-- Create **CONFIRMED** bookings (passenger + canonical seat code).
-- Look up bookings by reference or passenger name.
-- Cancel bookings (**409** if already cancelled).
-
-**Out of scope**
-
-- Payments, airline GDS/integration, authentication, waitlists.
-
-**Stack**
-
-- **Backend:** FastAPI · SQLAlchemy 2 · SQLite (`backend/app/`).
-- **Frontend:** Plain HTML/CSS/JS; **Express** only serves **`frontend/public`**.
-- **No** global `/api` prefix — routes mount at **`/flights`** and **`/bookings`**.
+Technical overview of how the system is structured and how booking and inventory behave. For **run instructions**, see **`README.md`**. For **operator workflows**, see **`USER_GUIDE.md`**.
 
 ---
 
-## 2. Logical architecture
+## 1. System overview
 
-```
-Browser (FlightHub UI, :3000)
-        │ fetch JSON (CORS limited to localhost/127.0.0.1 :3000)
-        ▼
-FastAPI (:8000)  ──►  routers (HTTP) ──►  services (transactions + rules)
-                              │                    │
-                              └────────────────────┴──►  SQLite file
-```
+- **Browser** — staff UI (static files; `fetch` to API).
+- **Express** — serves `frontend/public/` only; no business logic.
+- **FastAPI** — JSON REST API, validation, error mapping.
+- **SQLite** — single-file database (path from `DATABASE_URL`, default `./flighthub.db` with cwd `backend/`).
 
-Routers stay **thin**: validate with Pydantic / dependencies, call **one service** pathway, rely on **`register_exception_handlers`** for **404** / **409** / **422** / **500** domain mapping.
+API routes live at **`/flights`** and **`/bookings`**. OpenAPI UI: **`/docs`**.
 
 ---
 
-## 3. Data model (implemented)
+## 2. Code layout
 
-### 3.1 `Flight`
+| Area | Responsibility |
+|------|----------------|
+| **`routers/`** | HTTP mapping, Pydantic in/out, thin handlers |
+| **`services/`** | Transactions, booking rules, inventory, reconciliation |
+| **`models/`** | SQLAlchemy ORM (`Flight`, `Booking`) |
+| **`schemas/`** | Pydantic request/response shapes |
+| **`api/deps.py`** | DB session dependency, booking lookup query parsing |
+| **`api/exception_handlers.py`** | Domain errors → **404 / 409 / 422** (etc.) |
+| **`domain/cabin_layout.py`** | Seat catalogue and layout for this assessment’s simplified cabin |
 
-- **`total_seats`**: immutable capacity for catalogue generation (`app/domain/cabin_layout.py`).
-- **`seats_available`**: persisted column updated by booking/cancel flows; **must** be reconciled with derived open seats **before commit** after writes (see §4).
-
-### 3.2 `Booking`
-
-- **`booking_reference`**: unique, server-generated.
-- **`booking_status`**: `CONFIRMED` | `CANCELLED`.
-- **`cancelled_at`**: set when cancelled.
-- **Partial unique index** (SQLite): **`(flight_id, seat_number)`** unique **where `booking_status = 'CONFIRMED'`** (`app/models/booking.py`). Cancelled rows can free a seat label for reuse.
-
----
-
-## 4. Seat inventory, derivation & concurrency
-
-### 4.1 Source of truth for “how many seats are left?”
-
-**`flight_service.derive_seats_open(session, flight)`** computes:
-
-\[
-\text{open} = \text{total\_seats} - |\{\text{normalized confirmed seat codes}\}\cap\text{catalogue}|
-\]
-
-Occupied seats use **`normalize_seat_code`** so **`1a`** matches **`1A`** in logic. This matches **`GET /flights/{id}/seat-map`** tile availability (`flight_service.canonical_positions_with_confirmed_booking` / `SeatMapTile.available`).
-
-**`flight_service.flight_as_out`** always returns **`seats_available=derive_seats_open(...)`** so clients never see a stale scalar if the DB column drifted.
-
-### 4.2 Reconciliation
-
-**`flight_service.reconcile_flight_inventory(session, flight)`** assigns:
-
-`flight.seats_available ← derive_seats_open(session, flight)`
-
-**When it runs**
-
-- At the **start** of **`create_booking`** (repair drift before guarded decrement).
-- **Immediately after flushing** the new **`Booking`** row and **before** **`commit`** (**fix:** keeps the persisted column aligned under parallel decrements / rollbacks).
-- After cancellation status change **before commit** (**`cancel_booking`**).
-
-Cancellation **does not** manually increment the counter; **`reconcile_flight_inventory`** rebuilds from confirmed rows.
-
-### 4.3 Concurrency-safe booking gate
-
-Inside **`booking_service.create_booking`**:
-
-1. Validate flight exists; seat belongs to catalogue.
-2. Reject duplicate **CONFIRMED** occupancy for same normalized seat (**fast path**).
-3. **`reconcile_flight_inventory`**, **`flush`**.
-4. If **`seats_available <= 0`** → **`NoSeatsAvailableError`** (**409**).
-5. **`UPDATE flights SET seats_available = seats_available - 1`** with **`WHERE id = … AND seats_available > 0`**. **`rowcount != 1`** → **409**.
-6. Insert **`Booking`** (**CONFIRMED**).
-7. **`flush`**, **`reconcile_flight_inventory`**, **`commit`**.
-8. **`IntegrityError`** (parallel seat grab) → full **rollback**, surface **409 SeatAlreadyHeldError**.
-
-SQLite serializes conflicting writers on the **`flights`** row; the conditional **`UPDATE`** prevents overselling the last seat when combined with transactional rollback semantics.
+Tests: **`backend/tests/`** (pytest + isolated DB). Scripts: **`backend/scripts/verify_*.py`**.
 
 ---
 
-## 5. Flight search semantics
+## 3. Service-layer design
 
-**`flight_service.search_flights`**
+**Routers do not own business rules.** They validate input and call **`flight_service`** or **`booking_service`**. Those services:
 
-- SQL filters optional **`origin`**, **`destination`** (lower-cased equality), **`departure_date`** (UTC **`[start, next day)`** window).
-- Then **drops** flights where **`derive_seats_open ≤ 0`**.
+- Own **transaction boundaries** (`commit` / `rollback`).
+- Enforce **seat availability**, **uniqueness of active seats**, and **post-write reconciliation** of stored counts.
+- Stay callable from tests without going through HTTP.
 
-Hence search results mirror “bookable from the seating chart perspective,” unlike **`GET /flights`** which lists all rows regardless of occupancy.
-
----
-
-## 6. Cancellation behavior
-
-**`booking_service.cancel_booking`**
-
-- **404**: missing reference (`BookingNotFoundError`).
-- **409**: **`BookingAlreadyCancelledError`** if status already **`CANCELLED`**.
-- Otherwise set **`CANCELLED`**, **`cancelled_at`**, **`flush`**, **`reconcile_flight_inventory`**, **`commit`**.
-
-REST exposes both **`DELETE /bookings/{ref}`** and **`POST /bookings/{ref}/cancel`**.
-
-Frontend classifies certain **409/404** cancel responses as **informational overlays** (“Already cancelled”, “Booking not found”).
+This keeps concurrency and inventory logic in one place and avoids duplicating policy in the UI or multiple handlers.
 
 ---
 
-## 7. HTTP surface (actual paths)
+## 4. Database schema (conceptual)
 
-| Method | Path | Notes |
-|--------|------|--------|
-| `GET` | `/flights` | Full schedule |
-| `GET` | `/flights/search` | Filters; inventory filtered |
-| `GET` | `/flights/{id}/seat-map` | Cabin tiles |
-| `POST` | `/bookings` | Create → **201** |
-| `GET` | `/bookings` | Query **ref** XOR **passenger_full_name** |
-| `DELETE` | `/bookings/{booking_reference}` | Cancel |
-| `POST` | `/bookings/{booking_reference}/cancel` | Cancel (alt) |
+**`flights`** — `id`, route, `departure_datetime` (timezone-aware), `duration_minutes`, `price_per_seat`, `total_seats` (fixed capacity), **`seats_available`** (persisted, must stay consistent with bookings after each write — see §6).
 
-Swagger UI: **`/docs`**.
+**`bookings`** — `booking_reference` (unique), `flight_id`, `passenger_full_name`, `passport_number`, `seat_number`, `booking_status` (`CONFIRMED` | `CANCELLED`), timestamps, optional `cancelled_at`.
 
-Domain errors mapped in **`backend/app/api/exception_handlers.py`**.
+**Seat reuse after cancel:** SQLite **partial unique index** on `(flight_id, seat_number)` **only where** `booking_status = 'CONFIRMED'`, so a cancelled row does not block the same seat label for a new confirmed booking.
 
 ---
 
-## 8. Frontend role
+## 5. Booking lifecycle
 
-Express (`frontend/server.js`) serves static assets only. **`window.FLIGHTHUB_API_BASE`** / the **Backend base URL** field points the browser **`fetch`** at FastAPI.
-
-**Operational note:** **`seats_available`** in JSON is already reconciled/read-side derived in **`FlightOut`** — the UI disables **Book** on **`0`** for convenience, **not** instead of backend validation.
-
----
-
-## 9. Repository layout
-
-```
-backend/
-  app/
-    main.py               # lifespan: init_db, optional FLITHUB_RESET_SQLITE_ON_START purge
-    api/deps.py           # SessionDep + booking lookup dependency
-    db/session.py         # DATABASE_URL · engine · busy timeout · get_db
-    domain/cabin_layout.py
-    routers/flights.py
-    routers/bookings.py
-    services/flight_service.py
-    services/booking_service.py
-  scripts/                # standalone verify_*.py (temp DB each)
-  tests/                  # pytest · isolated DB via module reload fixture
-frontend/
-  public/
-  server.js
-```
+1. **Create** — Client sends `flight_id`, passenger fields, `seat_number`. Server validates the flight and that the seat exists on that aircraft’s layout, then attempts reservation inside one transaction (§6).
+2. **Confirm** — Success returns **201** and a generated **booking reference**; the flight’s open-seat picture updates.
+3. **Lookup** — `GET /bookings` with **exactly one** of `booking_reference` or `passenger_full_name` (name match is case-insensitive).
+4. **Cancel** — `DELETE /bookings/{ref}` or `POST /bookings/{ref}/cancel`. If already cancelled → **409**; unknown ref → **404**; success → status `CANCELLED` and inventory reconciled.
 
 ---
 
-## 10. Automated testing
+## 6. Seat inventory strategy
 
-| Kind | Location | Purpose |
-|------|-----------|---------|
-| **Pytest unit/API** | `backend/tests/` | Business rules (**409** inventory, cancel restores availability, search filters); **never** imports `SessionLocal` at module scope before fixtures |
-| **Script parity** | `backend/tests/test_verification_scripts.py` | Subprocess **`scripts/verify_*.py`** |
+**Two related notions:**
 
-Run from **`backend/`**: `python -m pytest`.
+1. **Derived open seats** — Computed from **`total_seats`** minus the set of **distinct, normalized** seat codes held by **CONFIRMED** bookings, intersected with the **known seat catalogue** for that aircraft. The **seat map** and **JSON `seats_available` in flight responses** use this derivation so clients see the same numbers as the diagram.
+2. **Persisted `seats_available`** on `flights` — Used for an **atomic guard** during booking (see concurrency). After successful writes it is **reconciled** to match the derived value so it does not drift under parallel traffic.
+
+**Reconciliation** (`flight_service.reconcile_flight_inventory`) resets the stored column from derived truth. It runs:
+
+- At the **start** of **`create_booking`** (repair before attempting decrement).
+- **After** flushing a new **`Booking`** and **before** **`commit`** (fixes drift when many threads decrement/rollback).
+- After marking a booking **CANCELLED** (**cancel** path does not hand-adjust `+1`; it reconciles).
 
 ---
 
-## 11. Design summary
+## 7. Concurrency & overbooking prevention
 
-| Topic | Decision |
-|-------|-----------|
-| API prefix | Root **`/flights`**, **`/bookings`** (no `/api`) |
-| Listed vs searched flights | **`list_flights`** all rows; **`search_flights`** only **`derive_open > 0`** |
-| Public seat counts | **`FlightOut.seats_available`** from **`derive_seats_open`** |
-| Persisted `seats_available` | Guarded decrement + **post-insert reconcile before commit** |
-| Seat collisions | Partial unique index + transactional **`IntegrityError` → rollback** |
-| Cancellation | **`reconcile_flight_inventory`** · **409** duplicate cancel |
+**Goal:** Never confirm more passengers than physical seats when multiple requests overlap.
 
-This keeps the codebase small while mirroring inventory discipline found in larger reservation systems.
+**Pattern:**
+
+1. Inside one transaction: reconcile, check stored `seats_available`, then run a single **`UPDATE … SET seats_available = seats_available - 1`** with **`WHERE id = ? AND seats_available > 0`**.
+2. Only if **exactly one row** is updated proceed to insert the **`CONFIRMED`** booking.
+3. On **unique-index violation** (narrow race on the same seat), **rollback** the whole transaction and return **409**.
+
+SQLite serializes writers on the same flight row; the conditional update ensures **only one winner** claims the last seat compared to naive read-then-write.
+
+Stress-style checks live in **`scripts/verify_overbooking_concurrency.py`** (parallel workers).
+
+---
+
+## 8. List vs search
+
+- **`GET /flights`** — Every flight row (sold-out included). Sort by departure.
+- **`GET /flights/search`** — Optional **`origin`**, **`destination`**, **`departure_date`** filters (UTC date window); responses omit flights with **no** derived open seats.
+
+---
+
+## 9. Frontend coupling
+
+The UI reads **`FlightOut`** payloads whose **`seats_available`** already reflects derived inventory. Client-side checks (e.g. disabling **Book**) are **hints only** — the API remains authoritative.
+
+---
+
+## 10. Trade-offs & simplifications
+
+| Topic | Choice |
+|-------|--------|
+| Auth | None — assumed internal network |
+| Payments / GDS | Out of scope |
+| Cabin layout | Deterministic simplified grid (domain module), not real airline configs |
+| DB | SQLite — simple ops; **`SQLITE_BUSY`** mitigated via connection timeout |
+| Idempotent cancel | **Repeat cancel → 409**, not silent success |
+
+---
+
+## 11. Testing
+
+**`pytest`** — isolated SQLite file per test (`tests/conftest.py`). Business scenarios: sold-out conflict, cancel restores counts, search filters.
+
+Subprocess tests optionally run **`scripts/verify_*.py`** against the same logic paths with temporary databases.
