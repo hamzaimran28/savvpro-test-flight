@@ -70,7 +70,11 @@ def main() -> None:
         data = r.json()
         assert len(data) == 3
         assert [x["destination"] for x in data] == ["LON", "PAR", "NYC"]
-        assert data[0]["seats_available"] == 0
+        # Seats available are derived from CONFIRMED occupancy (matches seat-map truth),
+        # not from the stale ``Flight.seats_available`` column used in fixtures.
+        assert data[0]["seats_available"] == data[0]["total_seats"] == 10
+        assert data[1]["seats_available"] == 20
+        assert data[2]["seats_available"] == 50
         need = {
             "id",
             "origin",
@@ -87,8 +91,8 @@ def main() -> None:
         r2 = client.get("/flights/search")
         assert r2.status_code == 200
         d2 = r2.json()
-        assert len(d2) == 2
-        assert {x["destination"] for x in d2} == {"PAR", "NYC"}
+        assert len(d2) == 3
+        assert {x["destination"] for x in d2} == {"LON", "PAR", "NYC"}
 
         r3 = client.get("/flights/search", params={"origin": "nyc", "destination": "par"})
         assert r3.status_code == 200
@@ -99,7 +103,8 @@ def main() -> None:
         assert len(r4.json()) == 2
 
         r5 = client.get("/flights/search", params={"departure_date": "2026-07-01"})
-        assert len(r5.json()) == 0
+        assert len(r5.json()) == 1
+        assert r5.json()[0]["destination"] == "LON"
 
         r6 = client.get("/flights/search", params={"departure_date": "bad"})
         assert r6.status_code == 422

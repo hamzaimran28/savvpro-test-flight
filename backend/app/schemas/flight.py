@@ -40,3 +40,19 @@ class FlightSearchQuery(BaseModel):
         if self.destination == "":
             self.destination = None
         return self
+
+
+class SeatMapTile(BaseModel):
+    """One physical position on the simplified cabin diagram."""
+
+    seat_number: str
+    available: bool
+
+
+class SeatMapOut(BaseModel):
+    """Grouped rows for rendering a deterministic A–F (per band) seating chart."""
+
+    flight_id: int
+    total_seats: int
+    columns_per_full_row: int = Field(default=6, ge=1)
+    rows: list[list[SeatMapTile]]

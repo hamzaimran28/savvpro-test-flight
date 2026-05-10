@@ -89,21 +89,30 @@ def main() -> None:
         )
         assert r_dup.status_code == 409
 
-        # Second booking different seat
+        # Second booking — other seat on a 2-seat layout (canonical 1B, not arbitrary)
         r2 = client.post(
             "/bookings",
             json={
                 "passenger_full_name": "Bob Tables",
                 "passport_number": "P7654321",
                 "flight_id": fid,
-                "seat_number": "2A",
+                "seat_number": "1B",
             },
         )
         assert r2.status_code == 201
         ref2 = r2.json()["booking_reference"]
 
-        # Third booking when full -> 409
-        r_full = client.post(
+        # Chart shows both seats on a 2-place aircraft (1A, 1B only)
+        sm = client.get(f"/flights/{fid}/seat-map")
+        assert sm.status_code == 200
+        smj = sm.json()
+        assert smj["total_seats"] == 2
+        assert len(sum(smj["rows"], [])) == 2
+        seats_by_label = {(t["seat_number"], t["available"]) for row in smj["rows"] for t in row}
+        assert seats_by_label == {("1A", False), ("1B", False)}
+
+        # Third booking invalid seat label -> 422
+        r_bad_seat = client.post(
             "/bookings",
             json={
                 "passenger_full_name": "Carol",
@@ -112,7 +121,7 @@ def main() -> None:
                 "seat_number": "3A",
             },
         )
-        assert r_full.status_code == 409
+        assert r_bad_seat.status_code == 422
 
         # Unknown flight -> 404
         r_nf = client.post(
@@ -194,12 +203,12 @@ def main() -> None:
                 "passenger_full_name": "Grace",
                 "passport_number": "G3333333",
                 "flight_id": fid,
-                "seat_number": "2A",
+                "seat_number": "1B",
             },
         )
         assert r_after_b.status_code == 201
 
-        # Full again
+        # Full cabin — attempted duplicate-confirmed seat
         assert (
             client.post(
                 "/bookings",
@@ -207,7 +216,7 @@ def main() -> None:
                     "passenger_full_name": "Heidi",
                     "passport_number": "H4444444",
                     "flight_id": fid,
-                    "seat_number": "3B",
+                    "seat_number": "1B",
                 },
             ).status_code
             == 409
@@ -229,7 +238,7 @@ def main() -> None:
                 "passenger_full_name": "A",
                 "passport_number": "A1111111",
                 "flight_id": fid_one,
-                "seat_number": "10A",
+                "seat_number": "1A",
             },
         )
         assert ok_a.status_code == 201
@@ -239,7 +248,7 @@ def main() -> None:
                 "passenger_full_name": "B",
                 "passport_number": "B2222222",
                 "flight_id": fid_one,
-                "seat_number": "11A",
+                "seat_number": "1A",
             },
         )
         assert lose.status_code == 409

@@ -12,6 +12,7 @@ from app.exceptions import (
     BookingNotFoundError,
     FlightNotFoundError,
     InventoryInvariantError,
+    InvalidSeatError,
     NoSeatsAvailableError,
     SeatAlreadyHeldError,
 )
@@ -23,6 +24,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     mapping: dict[type[AppError], int] = {
         FlightNotFoundError: 404,
         BookingNotFoundError: 404,
+        InvalidSeatError: 422,
         NoSeatsAvailableError: 409,
         SeatAlreadyHeldError: 409,
         BookingAlreadyCancelledError: 409,

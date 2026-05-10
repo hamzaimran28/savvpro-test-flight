@@ -21,7 +21,14 @@ class BookingCreate(BaseModel):
         description="Machine-readable passport or ID reference (letters and digits only).",
     )
     flight_id: int = Field(gt=0)
-    seat_number: str = Field(min_length=1, max_length=16)
+    seat_number: str = Field(
+        min_length=1,
+        max_length=16,
+        description=(
+            "Canonical cabin code for this airline (matches GET /flights/{id}/seat-map), "
+            'e.g. "1A" or "12F".'
+        ),
+    )
 
     model_config = ConfigDict(str_strip_whitespace=True)
 

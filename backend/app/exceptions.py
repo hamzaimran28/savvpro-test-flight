@@ -29,6 +29,12 @@ class SeatAlreadyHeldError(AppError):
     pass
 
 
+class InvalidSeatError(AppError):
+    """Chosen seat label is unknown for this aircraft configuration."""
+
+    pass
+
+
 class BookingNotFoundError(AppError):
     """No booking matches the supplied reference."""
 

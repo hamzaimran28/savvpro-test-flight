@@ -31,29 +31,21 @@ os.environ["DATABASE_URL"] = "sqlite:///" + dbpath.replace("\\", "/")
 from sqlalchemy import delete, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+from app.domain.cabin_layout import canonical_seat_labels  # noqa: E402
 from app.db.session import SessionLocal, engine, init_db  # noqa: E402
 from app.exceptions import NoSeatsAvailableError, SeatAlreadyHeldError  # noqa: E402
 from app.models.booking import Booking, BookingStatus  # noqa: E402
 from app.models.flight import Flight  # noqa: E402
-from app.services import booking_service  # noqa: E402
+from app.services import booking_service, flight_service  # noqa: E402
 
 
 def _assert_inventory(db: Session, flight_id: int) -> None:
     flight = db.get(Flight, flight_id)
     assert flight is not None
-    confirmed = db.scalar(
-        select(func.count())
-        .select_from(Booking)
-        .where(
-            Booking.flight_id == flight_id,
-            Booking.booking_status == BookingStatus.CONFIRMED,
-        ),
-    )
-    assert confirmed is not None
-    expected = flight.total_seats - int(confirmed)
+    expected = flight_service.derive_seats_open(db, flight)
     assert flight.seats_available == expected, (
         f"Invariant broken: seats_available={flight.seats_available} "
-        f"but total_seats={flight.total_seats} - confirmed={confirmed} => expected {expected}"
+        f"but derive_seats_open(chart rule) => expected {expected}"
     )
     assert 0 <= flight.seats_available <= flight.total_seats
 
@@ -116,11 +108,11 @@ def run_scenario(
     name: str,
     total_seats: int,
     workers: int,
-    seat_fn: int,
+    seat_fn,
     barrier: bool,
 ) -> None:
     """
-    seat_fn(i) -> seat label for worker i.
+    ``seat_fn(i) -> str`` must return a **canonical** seat label for the aircraft capacity.
     """
     init_db()
     with SessionLocal() as db:
@@ -180,47 +172,39 @@ def main() -> None:
     print("Overbooking / transactional inventory verification (concurrent SQLite)")
 
     # Many threads, one seat: at most one success
+    sole = canonical_seat_labels(1)[0]
     run_scenario(
-        name="last-seat stampede (unique seats, capacity 1)",
+        name="last-seat stampede (many workers, canonical 1A only)",
         total_seats=1,
         workers=40,
-        seat_fn=lambda i: f"R{i}",
+        seat_fn=lambda _i: sole,
         barrier=True,
     )
 
-    # Same physical seat label for everyone on a single-seat flight
-    run_scenario(
-        name="last-seat stampede (all same seat label)",
-        total_seats=1,
-        workers=40,
-        seat_fn=lambda i: "1A",
-        barrier=True,
-    )
+    labs5 = canonical_seat_labels(5)
 
-    # Capacity 5, 25 workers with distinct seats -> exactly 5 successes
     run_scenario(
-        name="capacity 5 vs 25 distinct seats",
+        name="capacity 5 vs 25 workers rotating canonical seats",
         total_seats=5,
         workers=25,
-        seat_fn=lambda i: f"S{i}",
+        seat_fn=lambda i: labs5[i % len(labs5)],
         barrier=True,
     )
 
-    # Many threads fight for the same seat while several seats exist: only one holder for that seat
+    labs8 = canonical_seat_labels(8)
     run_scenario(
-        name="same hot seat with spare capacity elsewhere",
+        name="capacity 8 vs 24 workers rotating canonical seats",
         total_seats=8,
         workers=24,
-        seat_fn=lambda i: "1A" if i % 2 == 0 else f"H{i}",
+        seat_fn=lambda i: labs8[i % len(labs8)],
         barrier=True,
     )
 
-    # Repeat last-seat scenario without barrier (ordering still serializes writes; invariant must hold)
     run_scenario(
         name="last-seat no barrier",
         total_seats=1,
         workers=30,
-        seat_fn=lambda i: f"N{i}",
+        seat_fn=lambda _i: sole,
         barrier=False,
     )
 

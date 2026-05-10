@@ -7,23 +7,33 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from app.api.deps import SessionDep
-from app.models.flight import Flight
-from app.schemas.flight import FlightOut, FlightSearchQuery
+from app.schemas.flight import FlightOut, FlightSearchQuery, SeatMapOut
 from app.services import flight_service
 
 router = APIRouter(prefix="/flights", tags=["flights"])
 
 
 @router.get("", response_model=list[FlightOut])
-def list_flights(session: SessionDep) -> list[Flight]:
+def list_flights(session: SessionDep) -> list[FlightOut]:
     """Return the full schedule including sold-out flights."""
-    return flight_service.list_flights(session)
+    return [
+        flight_service.flight_as_out(session, row)
+        for row in flight_service.list_flights(session)
+    ]
 
 
 @router.get("/search", response_model=list[FlightOut])
 def search_flights(
     session: SessionDep,
     filters: Annotated[FlightSearchQuery, Depends()],
-) -> list[Flight]:
+) -> list[FlightOut]:
     """Return flights with available inventory that match optional search filters."""
-    return flight_service.search_flights(session, filters)
+    rows = flight_service.search_flights(session, filters)
+    return [flight_service.flight_as_out(session, row) for row in rows]
+
+
+@router.get("/{flight_id}/seat-map", response_model=SeatMapOut)
+def seat_map(session: SessionDep, flight_id: int) -> SeatMapOut:
+    """Return deterministic cabin seating grid and which positions are currently free."""
+
+    return flight_service.seat_map_for_flight(session, flight_id)
