@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0f1218" />
+    <title>FlightHub — Internal dashboard</title>
+    <link rel="stylesheet" href="/css/app.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+
+    <div
+      id="global-loading"
+      class="global-loading hidden"
+      aria-hidden="true"
+    ></div>
+
+    <header class="top-header">
+      <div class="top-header-inner">
+        <div class="brand">
+          <h1 class="brand-title">FlightHub</h1>
+          <p class="brand-tagline muted">Internal Flight Booking Dashboard</p>
+        </div>
+        <nav class="toolbar" aria-label="API connection">
+          <div class="field-group field-group--toolbar">
+            <label class="field-label" for="api-base">Backend base URL</label>
+            <input
+              id="api-base"
+              class="field-input field-input--url"
+              type="url"
+              autocomplete="off"
+              spellcheck="false"
+              value="http://127.0.0.1:8000"
+            />
+          </div>
+          <button type="button" id="btn-test-api" class="btn btn-secondary">
+            Test connection
+          </button>
+        </nav>
+      </div>
+    </header>
+
+    <div
+      id="status-banner"
+      class="status-banner hidden"
+      role="status"
+      aria-live="polite"
+    ></div>
+
+    <main id="main-content" class="layout">
+      <!-- 1 — Search -->
+      <section class="card section-search" aria-labelledby="search-heading">
+        <header class="card-header">
+          <div>
+            <h2 id="search-heading" class="card-title">Search flights</h2>
+            <p class="card-lede muted">
+              Filters are optional. Only flights with open inventory are shown.
+              Departure date is interpreted in UTC.
+            </p>
+          </div>
+        </header>
+        <form id="search-form" class="form-grid">
+          <div class="field-group">
+            <label class="field-label" for="search-origin">Origin</label>
+            <input
+              id="search-origin"
+              class="field-input"
+              name="origin"
+              type="text"
+              maxlength="64"
+              placeholder="e.g. NYC"
+              autocomplete="off"
+            />
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="search-destination"
+              >Destination</label
+            >
+            <input
+              id="search-destination"
+              class="field-input"
+              name="destination"
+              type="text"
+              maxlength="64"
+              placeholder="e.g. LON"
+              autocomplete="off"
+            />
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="search-date">Departure date</label>
+            <input
+              id="search-date"
+              class="field-input"
+              name="departure_date"
+              type="date"
+            />
+          </div>
+          <div class="form-actions form-actions--grid">
+            <button
+              type="submit"
+              id="btn-search-submit"
+              class="btn btn-primary"
+            >
+              Search
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- 2 — Flight list -->
+      <section class="card section-flights" aria-labelledby="flights-heading">
+        <header class="card-header card-header--split">
+          <div>
+            <h2 id="flights-heading" class="card-title">Available flights</h2>
+            <p id="flights-mode-label" class="card-lede muted">
+              Showing: all flights
+            </p>
+          </div>
+          <button
+            type="button"
+            id="btn-refresh-flights"
+            class="btn btn-secondary"
+          >
+            Refresh list
+          </button>
+        </header>
+        <div class="table-wrap">
+          <table class="data-table" id="flights-table">
+            <thead>
+              <tr>
+                <th scope="col">ID</th>
+                <th scope="col">Origin</th>
+                <th scope="col">Destination</th>
+                <th scope="col">Departure</th>
+                <th scope="col">Duration</th>
+                <th scope="col">Price</th>
+                <th scope="col">Seats left</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody id="flights-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 3 — Booking -->
+      <section
+        id="section-booking"
+        class="card section-booking"
+        aria-labelledby="book-heading"
+        tabindex="-1"
+      >
+        <header class="card-header">
+          <div>
+            <h2 id="book-heading" class="card-title">New booking</h2>
+            <p class="card-lede muted">
+              Select a flight, passenger details, and a seat from the cabin map.
+            </p>
+          </div>
+        </header>
+        <div
+          id="booking-gate-msg"
+          class="booking-gate-msg alert-inline hidden"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <form id="booking-form" class="form-stack form-stack--booking">
+          <div class="form-panel">
+            <p class="form-panel-label muted">Flight & seat</p>
+            <div class="form-two-col">
+              <div class="field-group">
+                <label class="field-label" for="booking-flight-id"
+                  >Flight ID</label
+                >
+                <input
+                  id="booking-flight-id"
+                  class="field-input"
+                  name="flight_id"
+                  type="number"
+                  min="1"
+                  step="1"
+                  required
+                  placeholder="From schedule above"
+                  inputmode="numeric"
+                />
+                <span
+                  id="booking-flight-id-hint"
+                  class="field-feedback"
+                  aria-live="polite"
+                ></span>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="booking-seat-field"
+                  >Selected seat</label
+                >
+                <input
+                  id="booking-seat-field"
+                  class="field-input field-input-readonly"
+                  name="seat_number"
+                  type="text"
+                  maxlength="16"
+                  required
+                  readonly
+                  autocomplete="off"
+                  placeholder="Choose from cabin map"
+                  title="Tap an available seat in the cabin map."
+                />
+                <span class="field-hint muted"
+                  >Filled when you tap a seat on the map</span
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="form-panel">
+            <p class="form-panel-label muted">Passenger</p>
+            <div class="field-group">
+              <label class="field-label" for="passenger-name"
+                >Full legal name</label
+              >
+              <input
+                id="passenger-name"
+                class="field-input"
+                name="passenger_full_name"
+                type="text"
+                maxlength="500"
+                required
+                autocomplete="name"
+              />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="passport-number"
+                >Passport number</label
+              >
+              <span class="field-hint muted">Letters and digits only</span>
+              <input
+                id="passport-number"
+                class="field-input"
+                name="passport_number"
+                type="text"
+                maxlength="32"
+                required
+                pattern="[A-Za-z0-9]+"
+                title="Use letters and digits only"
+                autocomplete="off"
+              />
+              <span
+                id="passport-feedback"
+                class="field-feedback"
+                aria-live="polite"
+              ></span>
+            </div>
+          </div>
+
+          <div id="seat-chart-wrap" class="seat-chart-wrap">
+            <h3 id="cabin-seating-heading" class="seat-chart-heading">
+              Cabin seating
+            </h3>
+            <p id="seat-chart-hint" class="seat-chart-hint muted">
+              Green = available · red = booked · blue = selected.
+            </p>
+            <div class="seat-legend muted" aria-hidden="true">
+              <span
+                ><span class="lgd-swatch lgd-available"></span> Available</span
+              >
+              <span><span class="lgd-swatch lgd-booked"></span> Booked</span>
+              <span><span class="lgd-swatch lgd-pick"></span> Selected</span>
+            </div>
+            <div class="cabin-shell" aria-labelledby="cabin-seating-heading">
+              <div class="cabin-shell-label muted" aria-hidden="true">
+                <span class="cabin-nose-dot"></span> Forward
+              </div>
+              <div id="seat-chart-placeholder" class="seat-chart-placeholder">
+                <div class="seat-chart-placeholder-art" aria-hidden="true">
+                  ✈
+                </div>
+                <p
+                  id="seat-chart-placeholder-title"
+                  class="seat-chart-placeholder-title"
+                >
+                  Cabin not loaded
+                </p>
+                <p
+                  id="seat-chart-placeholder-sub"
+                  class="seat-chart-placeholder-sub muted"
+                >
+                  Enter a flight ID above to load the seat map for that
+                  aircraft.
+                </p>
+              </div>
+              <div id="seat-chart-stage" class="seat-chart-stage hidden">
+                <div
+                  id="seat-chart-headers"
+                  class="seat-chart-headers hidden"
+                  aria-hidden="true"
+                ></div>
+                <div
+                  id="seat-chart"
+                  class="seat-chart"
+                  role="group"
+                  aria-label="Seat selection"
+                ></div>
+                <button
+                  type="button"
+                  id="btn-clear-seat"
+                  class="btn btn-secondary btn-clear-seat hidden"
+                >
+                  Clear seat selection
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button
+              type="submit"
+              id="btn-submit-booking"
+              class="btn btn-primary"
+            >
+              Confirm booking
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- 4 — Lookup -->
+      <section class="card section-lookup" aria-labelledby="lookup-heading">
+        <header class="card-header">
+          <div>
+            <h2 id="lookup-heading" class="card-title">Booking lookup</h2>
+            <p class="card-lede muted">Use exactly one lookup method.</p>
+          </div>
+        </header>
+        <fieldset class="toggle-group">
+          <legend class="toggle-legend muted">Lookup method</legend>
+          <label class="toggle-option">
+            <input type="radio" name="lookup_mode" value="reference" checked />
+            <span>By reference</span>
+          </label>
+          <label class="toggle-option">
+            <input type="radio" name="lookup_mode" value="passenger" />
+            <span>By passenger name</span>
+          </label>
+        </fieldset>
+        <form id="lookup-form" class="form-stack">
+          <div class="field-group" id="lookup-ref-wrap">
+            <label class="field-label" for="lookup-reference"
+              >Booking reference</label
+            >
+            <input
+              id="lookup-reference"
+              class="field-input"
+              type="text"
+              maxlength="32"
+              autocomplete="off"
+            />
+          </div>
+          <div class="field-group hidden" id="lookup-name-wrap">
+            <label class="field-label" for="lookup-name"
+              >Passenger full name</label
+            >
+            <input
+              id="lookup-name"
+              class="field-input"
+              type="text"
+              maxlength="500"
+              autocomplete="off"
+            />
+          </div>
+          <div class="form-actions">
+            <button
+              type="submit"
+              id="btn-lookup-submit"
+              class="btn btn-primary"
+            >
+              Search bookings
+            </button>
+          </div>
+        </form>
+        <div class="table-wrap table-wrap--mt">
+          <table class="data-table" id="lookup-table">
+            <thead>
+              <tr>
+                <th scope="col">Reference</th>
+                <th scope="col">Flight</th>
+                <th scope="col">Passenger</th>
+                <th scope="col">Seat</th>
+                <th scope="col">Status</th>
+                <th scope="col">Created</th>
+              </tr>
+            </thead>
+            <tbody id="lookup-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 5 — Cancel -->
+      <section
+        class="card section-cancel danger-zone"
+        aria-labelledby="cancel-heading"
+      >
+        <header class="card-header">
+          <div>
+            <h2 id="cancel-heading" class="card-title">Cancel booking</h2>
+            <p class="card-lede muted">
+              Cancelling removes the reservation and returns the seat to
+              inventory.
+            </p>
+          </div>
+        </header>
+        <form id="cancel-form" class="form-inline-cancel">
+          <div class="field-group field-grow">
+            <label class="field-label" for="cancel-reference"
+              >Booking reference</label
+            >
+            <input
+              id="cancel-reference"
+              class="field-input"
+              type="text"
+              maxlength="32"
+              required
+              autocomplete="off"
+            />
+          </div>
+          <button type="submit" id="btn-cancel-submit" class="btn btn-danger">
+            Cancel booking
+          </button>
+        </form>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <div class="app-footer-inner muted">
+        <p>
+          FlightHub staff console · CORS must allow this origin
+          (<code>http://127.0.0.1:3000</code>).
+        </p>
+      </div>
+    </footer>
+
+    <div
+      id="action-overlay"
+      class="action-overlay hidden"
+      aria-hidden="true"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="action-overlay-title"
+      aria-describedby="action-overlay-msg"
+    >
+      <div
+        class="action-overlay-backdrop"
+        data-overlay-dismiss
+        tabindex="-1"
+      ></div>
+      <div class="action-overlay-panel">
+        <p id="action-overlay-title" class="action-overlay-title"></p>
+        <p id="action-overlay-msg" class="action-overlay-msg"></p>
+        <div class="action-overlay-actions">
+          <button
+            type="button"
+            id="action-overlay-dismiss"
+            class="btn btn-secondary btn-overlay-dismiss"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      window.FLIGHTHUB_API_BASE =
+        window.FLIGHTHUB_API_BASE || "http://127.0.0.1:8000";
+    </script>
+    <script src="/js/app.js" defer></script>
+  </body>
+</html>
