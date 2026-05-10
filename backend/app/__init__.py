@@ -1,0 +1,1 @@
+"""FlightHub FastAPI application package."""
