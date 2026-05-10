@@ -1,4 +1,4 @@
-"""Booking creation, lookup, cancellation — transactional inventory rules."""
+"""Booking lifecycle: atomic inventory mutation, lookups, cancellations."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.exceptions import (
     BookingAlreadyCancelledError,
-    BookingLookupValidationError,
     BookingNotFoundError,
     FlightNotFoundError,
     InventoryInvariantError,
@@ -20,24 +19,29 @@ from app.exceptions import (
 )
 from app.models.booking import Booking, BookingStatus
 from app.models.flight import Flight
+from app.schemas.booking import BookingLookupQuery
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _generate_booking_reference(db: Session) -> str:
+def _allocate_booking_reference(session: Session) -> str:
+    """Generate a collision-resistant booking reference checked against the DB."""
     for _ in range(16):
-        ref = secrets.token_urlsafe(12)[:31]
-        if db.scalar(select(Booking.id).where(Booking.booking_reference == ref).limit(1)):
-            continue
-        return ref
-    msg = "Could not allocate a unique booking reference"
-    raise InventoryInvariantError(msg)
+        candidate = secrets.token_urlsafe(12)[:31]
+        exists = session.scalar(
+            select(Booking.id).where(Booking.booking_reference == candidate).limit(1),
+        )
+        if exists is None:
+            return candidate
+    raise InventoryInvariantError(
+        "Unable to allocate a unique booking_reference after repeated attempts.",
+    )
 
 
 def create_booking(
-    db: Session,
+    session: Session,
     *,
     flight_id: int,
     passenger_full_name: str,
@@ -45,136 +49,137 @@ def create_booking(
     seat_number: str,
 ) -> Booking:
     """
-    Create a confirmed booking inside a single transaction:
+    Reserve one confirmed seat atomically:
 
-    1. Ensure flight exists.
-    2. Atomically decrement ``seats_available`` only while stock remains.
-    3. Insert booking (server-generated reference; partial unique index enforces seat).
+    - Ensure the flight exists.
+    - Run a guarded ``UPDATE`` that decrements ``seats_available`` only while stock remains.
+    - Insert the ``CONFIRMED`` booking; the partial unique index rejects duplicate active seats.
 
-    On any failure after a write, the session is rolled back so inventory stays consistent.
+    If anything fails after the ``UPDATE``, the session is rolled back so inventory counters stay
+    aligned with confirmed rows.
+
+    We use explicit ``commit()`` / ``rollback()`` (not nested ``session.begin()`` blocks) so this
+    path stays predictable with SQLite’s default implicit transaction/autobegin behaviour.
     """
-    name = passenger_full_name.strip()
-    passport = passport_number.strip()
-    seat = seat_number.strip().upper()
+    normalized_name = passenger_full_name.strip()
+    normalized_passport = passport_number.strip()
+    normalized_seat = seat_number.strip().upper()
 
-    flight = db.get(Flight, flight_id)
-    if flight is None:
-        raise FlightNotFoundError(f"Flight with id {flight_id} does not exist")
+    if session.get(Flight, flight_id) is None:
+        raise FlightNotFoundError(f"No flight exists with id {flight_id}.")
+
+    booking_row: Booking
 
     try:
-        dec = (
+        claim = session.execute(
             update(Flight)
             .where(
                 Flight.id == flight_id,
                 Flight.seats_available > 0,
             )
-            .values(seats_available=Flight.seats_available - 1)
+            .values(seats_available=Flight.seats_available - 1),
         )
-        result = db.execute(dec)
-        if result.rowcount != 1:
+        if claim.rowcount != 1:
             raise NoSeatsAvailableError(
-                "No seats available for this flight; booking could not be completed.",
+                "This flight has no seats left. Another traveller may have taken the last seat.",
             )
 
-        reference = _generate_booking_reference(db)
-        booking = Booking(
+        reference = _allocate_booking_reference(session)
+        booking_row = Booking(
             booking_reference=reference,
             flight_id=flight_id,
-            passenger_full_name=name,
-            passport_number=passport,
-            seat_number=seat,
+            passenger_full_name=normalized_name,
+            passport_number=normalized_passport,
+            seat_number=normalized_seat,
             booking_status=BookingStatus.CONFIRMED,
             cancelled_at=None,
         )
-        db.add(booking)
-        db.flush()
+        session.add(booking_row)
+        session.flush()
     except NoSeatsAvailableError:
-        db.rollback()
+        session.rollback()
         raise
     except InventoryInvariantError:
-        db.rollback()
+        session.rollback()
         raise
-    except IntegrityError:
-        db.rollback()
+    except IntegrityError as exc:
+        session.rollback()
         raise SeatAlreadyHeldError(
-            "This seat is already booked on this flight, or the booking reference collided.",
-        ) from None
+            "That seat already has an active booking on this flight. Pick a different seat.",
+        ) from exc
     except Exception:
-        db.rollback()
+        session.rollback()
         raise
 
-    db.commit()
-    db.refresh(booking)
-    return booking
+    session.commit()
+    session.refresh(booking_row)
+    return booking_row
 
 
-def lookup_bookings(
-    db: Session,
-    *,
-    booking_reference: str | None,
-    passenger_full_name: str | None,
-) -> list[Booking]:
+def lookup_bookings(session: Session, *, filters: BookingLookupQuery) -> list[Booking]:
+    """
+    Lookup by reference (exact) or passenger legal name (case-insensitive equality).
+
+    ``BookingLookupQuery`` guarantees exactly one discriminator is populated at the router layer.
+    """
     stmt = select(Booking).options(selectinload(Booking.flight))
 
-    ref = booking_reference.strip() if booking_reference else None
-    name = passenger_full_name.strip() if passenger_full_name else None
-
-    if ref and name:
-        raise BookingLookupValidationError(
-            "Provide only one of booking_reference or passenger_full_name, not both.",
+    if filters.booking_reference is not None:
+        stmt = stmt.where(Booking.booking_reference == filters.booking_reference)
+    elif filters.passenger_full_name is not None:
+        stmt = stmt.where(
+            func.lower(Booking.passenger_full_name)
+            == filters.passenger_full_name.lower(),
         )
-
-    if ref:
-        stmt = stmt.where(Booking.booking_reference == ref)
-    elif name:
-        stmt = stmt.where(func.lower(Booking.passenger_full_name) == name.lower())
     else:
-        raise BookingLookupValidationError(
-            "Provide either booking_reference or passenger_full_name as a query parameter.",
-        )
+        # BookingLookupQuery enforces exactly one discriminator; never return unfiltered rows.
+        return []
 
     stmt = stmt.order_by(Booking.created_at.desc())
-    return list(db.scalars(stmt).all())
+    return list(session.scalars(stmt).all())
 
 
-def cancel_booking(db: Session, *, booking_reference: str) -> Booking:
-    """Cancel by reference: restore inventory and mark CANCELLED in one transaction."""
-    ref = booking_reference.strip()
-    if not ref:
-        raise BookingNotFoundError("Booking reference is required")
+def cancel_booking(session: Session, *, booking_reference: str) -> Booking:
+    """Increase ``seats_available`` (guarded) and mark the reservation ``CANCELLED``."""
+    trimmed_ref = booking_reference.strip()
+    if not trimmed_ref:
+        raise BookingNotFoundError("Missing booking_reference; cannot cancel.")
 
-    booking = db.scalar(select(Booking).where(Booking.booking_reference == ref))
-    if booking is None:
-        raise BookingNotFoundError(f"Booking '{ref}' does not exist")
-
-    if booking.booking_status == BookingStatus.CANCELLED:
-        raise BookingAlreadyCancelledError(f"Booking '{ref}' is already cancelled.")
+    booking_row = session.scalar(
+        select(Booking).where(Booking.booking_reference == trimmed_ref),
+    )
+    if booking_row is None:
+        raise BookingNotFoundError(f"No booking exists with reference “{trimmed_ref}”.")
+    if booking_row.booking_status == BookingStatus.CANCELLED:
+        raise BookingAlreadyCancelledError(
+            f"Booking “{trimmed_ref}” is already cancelled.",
+        )
 
     try:
-        inc = (
+        restore = session.execute(
             update(Flight)
             .where(
-                Flight.id == booking.flight_id,
+                Flight.id == booking_row.flight_id,
                 Flight.seats_available < Flight.total_seats,
             )
-            .values(seats_available=Flight.seats_available + 1)
+            .values(seats_available=Flight.seats_available + 1),
         )
-        res = db.execute(inc)
-        if res.rowcount != 1:
+        if restore.rowcount != 1:
+            session.rollback()
             raise InventoryInvariantError(
-                "Could not restore seat inventory; flight seat counts may be inconsistent.",
+                "Seat inventory could not be restored (internal consistency check failed). "
+                "The booking was left unchanged.",
             )
 
-        booking.booking_status = BookingStatus.CANCELLED
-        booking.cancelled_at = _utcnow()
-        db.flush()
+        booking_row.booking_status = BookingStatus.CANCELLED
+        booking_row.cancelled_at = _utcnow()
+        session.flush()
     except InventoryInvariantError:
-        db.rollback()
         raise
     except Exception:
-        db.rollback()
+        session.rollback()
         raise
 
-    db.commit()
-    db.refresh(booking)
-    return booking
+    session.commit()
+    session.refresh(booking_row)
+    return booking_row

@@ -1,53 +1,47 @@
-"""Flight listing and search (query) logic."""
+"""Flight listing and search (read-side query logic only)."""
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
-from typing import Optional
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.flight import Flight
+from app.schemas.flight import FlightSearchQuery
 
 
-def list_flights(db: Session) -> list[Flight]:
-    """Return every flight row, ordered by departure time (soonest first)."""
+def list_flights(session: Session) -> list[Flight]:
+    """Return every flight, soonest departure first."""
     stmt = select(Flight).order_by(Flight.departure_datetime.asc())
-    return list(db.scalars(stmt).all())
+    return list(session.scalars(stmt).all())
 
 
-def search_flights(
-    db: Session,
-    *,
-    origin: Optional[str] = None,
-    destination: Optional[str] = None,
-    departure_date: Optional[date] = None,
-) -> list[Flight]:
+def search_flights(session: Session, filters: FlightSearchQuery) -> list[Flight]:
     """
-    Return flights matching optional filters.
+    Find flights matching optional criteria.
 
-    Only rows with ``seats_available > 0`` are included (bookable inventory).
-    Origin and destination are matched case-insensitively when provided.
-    Departure date compares the calendar day in UTC against ``departure_datetime``.
+    Only rows with inventory (``seats_available > 0``) appear — this is the “bookable” search.
+    Origin and destination comparisons are case-insensitive when provided.
+    Departure filters use the UTC calendar day of ``flight.departure_datetime``.
     """
     stmt = select(Flight).where(Flight.seats_available > 0)
 
-    if origin is not None and origin.strip():
-        needle = origin.strip().lower()
+    if filters.origin:
+        needle = filters.origin.lower()
         stmt = stmt.where(func.lower(Flight.origin) == needle)
 
-    if destination is not None and destination.strip():
-        needle = destination.strip().lower()
+    if filters.destination:
+        needle = filters.destination.lower()
         stmt = stmt.where(func.lower(Flight.destination) == needle)
 
-    if departure_date is not None:
-        start = datetime.combine(departure_date, time.min, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
+    if filters.departure_date is not None:
+        day_start = datetime.combine(filters.departure_date, time.min, tzinfo=timezone.utc)
+        day_end = day_start + timedelta(days=1)
         stmt = stmt.where(
-            Flight.departure_datetime >= start,
-            Flight.departure_datetime < end,
+            Flight.departure_datetime >= day_start,
+            Flight.departure_datetime < day_end,
         )
 
     stmt = stmt.order_by(Flight.departure_datetime.asc())
-    return list(db.scalars(stmt).all())
+    return list(session.scalars(stmt).all())

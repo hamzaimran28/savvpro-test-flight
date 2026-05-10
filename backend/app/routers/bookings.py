@@ -1,22 +1,10 @@
-"""HTTP routes for bookings (thin — delegates to booking service)."""
+"""Booking HTTP surface — validation via Pydantic; domain rules live in ``booking_service``."""
 
 from __future__ import annotations
 
-from typing import Annotated
+from fastapi import APIRouter, status
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
-
-from app.db.session import get_db
-from app.exceptions import (
-    BookingAlreadyCancelledError,
-    BookingLookupValidationError,
-    BookingNotFoundError,
-    FlightNotFoundError,
-    InventoryInvariantError,
-    NoSeatsAvailableError,
-    SeatAlreadyHeldError,
-)
+from app.api.deps import BookingLookupDep, SessionDep
 from app.models.booking import Booking
 from app.schemas.booking import BookingCreate, BookingOut
 from app.services import booking_service
@@ -24,87 +12,47 @@ from app.services import booking_service
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 
-def _cancel_booking_http(db: Session, booking_reference: str) -> Booking:
-    try:
-        return booking_service.cancel_booking(db, booking_reference=booking_reference)
-    except BookingNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.detail) from exc
-    except BookingAlreadyCancelledError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
-    except InventoryInvariantError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=exc.detail,
-        ) from exc
-
-
-@router.post("", response_model=BookingOut, status_code=status.HTTP_201_CREATED)
-def post_booking(payload: BookingCreate, db: Session = Depends(get_db)) -> Booking:
-    try:
-        return booking_service.create_booking(
-            db,
-            flight_id=payload.flight_id,
-            passenger_full_name=payload.passenger_full_name,
-            passport_number=payload.passport_number,
-            seat_number=payload.seat_number,
-        )
-    except FlightNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.detail) from exc
-    except NoSeatsAvailableError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
-    except SeatAlreadyHeldError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
-    except InventoryInvariantError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=exc.detail,
-        ) from exc
+@router.post(
+    "",
+    response_model=BookingOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_booking(
+    payload: BookingCreate,
+    session: SessionDep,
+) -> Booking:
+    """Create a confirmed reservation; ``booking_reference`` is generated server-side."""
+    return booking_service.create_booking(
+        session,
+        flight_id=payload.flight_id,
+        passenger_full_name=payload.passenger_full_name,
+        passport_number=payload.passport_number,
+        seat_number=payload.seat_number,
+    )
 
 
 @router.get("", response_model=list[BookingOut])
-def get_bookings(
-    db: Session = Depends(get_db),
-    booking_reference: Annotated[
-        str | None,
-        Query(max_length=32, description="Exact booking reference"),
-    ] = None,
-    passenger_full_name: Annotated[
-        str | None,
-        Query(max_length=500, description="Exact passenger match (case-insensitive)"),
-    ] = None,
+def list_bookings(
+    session: SessionDep,
+    lookup: BookingLookupDep,
 ) -> list[Booking]:
-    try:
-        return booking_service.lookup_bookings(
-            db,
-            booking_reference=booking_reference,
-            passenger_full_name=passenger_full_name,
-        )
-    except BookingLookupValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=exc.detail,
-        ) from exc
+    """Find bookings by immutable reference or passenger name (mutually exclusive filters)."""
+    return booking_service.lookup_bookings(session, filters=lookup)
 
 
-@router.delete(
-    "/{booking_reference}",
-    response_model=BookingOut,
-)
-def delete_booking(
+@router.delete("/{booking_reference}", response_model=BookingOut)
+def cancel_booking_via_delete(
     booking_reference: str,
-    db: Session = Depends(get_db),
+    session: SessionDep,
 ) -> Booking:
-    return _cancel_booking_http(db, booking_reference)
+    """Cancel by ``booking_reference`` (REST DELETE)."""
+    return booking_service.cancel_booking(session, booking_reference=booking_reference)
 
 
-@router.post(
-    "/{booking_reference}/cancel",
-    response_model=BookingOut,
-)
-def post_cancel_booking(
+@router.post("/{booking_reference}/cancel", response_model=BookingOut)
+def cancel_booking_via_post(
     booking_reference: str,
-    db: Session = Depends(get_db),
+    session: SessionDep,
 ) -> Booking:
-    """Cancel using POST for clients that prefer a non-idempotent-safe verb semantics."""
-
-    return _cancel_booking_http(db, booking_reference)
+    """Alternative cancel for clients that cannot issue DELETE requests."""
+    return booking_service.cancel_booking(session, booking_reference=booking_reference)

@@ -1,6 +1,12 @@
-"""Pydantic schemas for API request/response bodies."""
+"""Pydantic request/response/query models."""
 
-from app.schemas.booking import BookingCreate, BookingOut
-from app.schemas.flight import FlightOut
+from app.schemas.booking import BookingCreate, BookingLookupQuery, BookingOut
+from app.schemas.flight import FlightOut, FlightSearchQuery
 
-__all__ = ("BookingCreate", "BookingOut", "FlightOut")
+__all__ = (
+    "BookingCreate",
+    "BookingLookupQuery",
+    "BookingOut",
+    "FlightOut",
+    "FlightSearchQuery",
+)
