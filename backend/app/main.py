@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.db.session import init_db
+from app.routers.bookings import router as bookings_router
 from app.routers.flights import router as flights_router
 
 
@@ -23,3 +24,4 @@ app = FastAPI(
 )
 
 app.include_router(flights_router)
+app.include_router(bookings_router)
