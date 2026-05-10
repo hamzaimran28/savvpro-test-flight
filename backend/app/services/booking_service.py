@@ -132,6 +132,9 @@ def create_booking(
         )
         session.add(booking_row)
         session.flush()
+        # Persisted counter can drift under concurrent decrement + rollback; reconcile
+        # to match seat-map derivation before commit (see derive_seats_open).
+        flight_service.reconcile_flight_inventory(session, flight_row)
     except NoSeatsAvailableError:
         session.rollback()
         raise
